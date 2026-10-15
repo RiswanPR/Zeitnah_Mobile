@@ -1,18 +1,43 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
+import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
 import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import * as SystemUI from 'expo-system-ui';
+import { useEffect } from 'react';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { ZeitnahColors } from '@/constants/theme';
 
 SplashScreen.preventAutoHideAsync();
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+// Ensure the root native window background matches the dark brand palette
+SystemUI.setBackgroundColorAsync(ZeitnahColors.background).catch(() => {});
+
+const navigationTheme = {
+  ...DarkTheme,
+  colors: {
+    ...DarkTheme.colors,
+    background: ZeitnahColors.background,
+    card: ZeitnahColors.cardSurface,
+    text: ZeitnahColors.primaryText,
+    border: ZeitnahColors.border,
+  },
+};
+
+export default function RootLayout() {
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync(ZeitnahColors.background).catch(() => {});
+  }, []);
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
+    <ThemeProvider value={navigationTheme}>
       <AnimatedSplashOverlay />
-      <AppTabs />
+      <Stack
+        screenOptions={{
+          headerShown: false,
+          contentStyle: { backgroundColor: ZeitnahColors.background },
+          animation: 'fade',
+        }}>
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+      </Stack>
     </ThemeProvider>
   );
 }
