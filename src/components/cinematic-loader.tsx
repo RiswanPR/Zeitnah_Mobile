@@ -35,6 +35,8 @@ export const CinematicLoader = memo(function CinematicLoader({
   ).current;
 
   // Track animation instances to stop them on unmount
+  const entranceAnimRef = useRef<Animated.CompositeAnimation | null>(null);
+  const exitAnimRef = useRef<Animated.CompositeAnimation | null>(null);
   const glowLoopRef = useRef<Animated.CompositeAnimation | null>(null);
   const beamLoopRef = useRef<Animated.CompositeAnimation | null>(null);
 
@@ -52,7 +54,7 @@ export const CinematicLoader = memo(function CinematicLoader({
 
       if (reducedMotion) {
         // Reduced motion: instantaneous fade, no scaling, stationary glow
-        Animated.parallel([
+        entranceAnimRef.current = Animated.parallel([
           Animated.timing(logoFadeAnim, {
             toValue: 1,
             duration: 300,
@@ -63,11 +65,12 @@ export const CinematicLoader = memo(function CinematicLoader({
             duration: 400,
             useNativeDriver: true,
           }),
-        ]).start();
+        ]);
+        entranceAnimRef.current.start();
       } else {
         // Premium restrained entrance sequence:
         // 1. Logo fades in while gently scaling from 94% to 100%
-        Animated.parallel([
+        entranceAnimRef.current = Animated.parallel([
           Animated.timing(logoFadeAnim, {
             toValue: 1,
             duration: 600,
@@ -87,7 +90,8 @@ export const CinematicLoader = memo(function CinematicLoader({
             easing: Easing.out(Easing.sin),
             useNativeDriver: true,
           }),
-        ]).start(({ finished }) => {
+        ]);
+        entranceAnimRef.current.start(({ finished }) => {
           if (!finished || !isMounted) return;
 
           // 3. Subtle, organic ambient breathing loop
@@ -132,8 +136,13 @@ export const CinematicLoader = memo(function CinematicLoader({
 
     return () => {
       isMounted = false;
+      entranceAnimRef.current?.stop();
       glowLoopRef.current?.stop();
       beamLoopRef.current?.stop();
+      logoFadeAnim.stopAnimation();
+      logoScaleAnim.stopAnimation();
+      glowPulseAnim.stopAnimation();
+      beamTranslateAnim.stopAnimation();
     };
   }, [
     isReady,
@@ -147,21 +156,45 @@ export const CinematicLoader = memo(function CinematicLoader({
 
   // Handle smooth seamless exit when WebView signals readiness or error
   useEffect(() => {
+    let isCurrent = true;
     if (isReady || hasError) {
-      Animated.timing(containerFadeAnim, {
+      entranceAnimRef.current?.stop();
+      glowLoopRef.current?.stop();
+      beamLoopRef.current?.stop();
+
+      exitAnimRef.current = Animated.timing(containerFadeAnim, {
         toValue: 0,
         duration: 320,
         easing: Easing.out(Easing.quad),
         useNativeDriver: true,
-      }).start(({ finished }) => {
-        if (finished) {
+      });
+
+      exitAnimRef.current.start(({ finished }) => {
+        if (finished && isCurrent) {
           setVisible(false);
-          glowLoopRef.current?.stop();
-          beamLoopRef.current?.stop();
+          containerFadeAnim.stopAnimation();
+          logoFadeAnim.stopAnimation();
+          logoScaleAnim.stopAnimation();
+          glowPulseAnim.stopAnimation();
+          beamTranslateAnim.stopAnimation();
         }
       });
     }
-  }, [isReady, hasError, containerFadeAnim]);
+
+    return () => {
+      isCurrent = false;
+      exitAnimRef.current?.stop();
+      containerFadeAnim.stopAnimation();
+    };
+  }, [
+    isReady,
+    hasError,
+    containerFadeAnim,
+    logoFadeAnim,
+    logoScaleAnim,
+    glowPulseAnim,
+    beamTranslateAnim,
+  ]);
 
   if (!visible) {
     return null;

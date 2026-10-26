@@ -3,12 +3,18 @@
     "name": "Zeitnah",
     "slug": "zeitnah-mobile",
     "version": "1.0.3",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/images/icon.png",
     "scheme": "zeitnah",
     "userInterfaceStyle": "dark",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "bundleIdentifier": "com.primefxt.ZeitnahAcademy",
+      "buildNumber": "2",
+      "supportsTablet": true,
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.primefxt.ZeitnahAcademy",
@@ -22,11 +28,7 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.INTERNET",
-        "android.permission.ACCESS_NETWORK_STATE",
-        "android.permission.CAMERA",
-        "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_VIDEO"
+        "android.permission.ACCESS_NETWORK_STATE"
       ]
     },
     "web": {
@@ -42,7 +44,8 @@
           "image": "./assets/images/zeitnah-logo.png",
           "imageWidth": 140
         }
-      ]
+      ],
+      "./plugins/withVdoCipher"
     ],
     "experiments": {
       "typedRoutes": true,

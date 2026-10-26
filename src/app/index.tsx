@@ -29,6 +29,12 @@ import type {
 import { useNetInfo } from '@react-native-community/netinfo';
 
 import { CinematicLoader } from '@/components/cinematic-loader';
+import {
+  VdoPlayerEmbedded,
+  type VdoEmbedInfo,
+  type VdoPlayerLayout,
+  type VdoPlayerEmbeddedRef,
+} from '@/components/vdo-player-embedded';
 import { ZeitnahColors } from '@/constants/theme';
 
 const TARGET_URL = 'https://zeitnahacademy.com';
@@ -161,6 +167,93 @@ export default function HomeScreen() {
   const isOffline =
     netInfo.isConnected === false || netInfo.isInternetReachable === false;
 
+  // Native VdoCipher player state (Embedded hardware FairPlay/Widevine player)
+  const [nativePlayerEmbedInfo, setNativePlayerEmbedInfo] =
+    useState<VdoEmbedInfo | null>(null);
+  const [nativePlayerLayout, setNativePlayerLayout] =
+    useState<VdoPlayerLayout | null>(null);
+  const [isNativePlayerVisible, setIsNativePlayerVisible] = useState(false);
+  const [isNativePlayerFullscreen, setIsNativePlayerFullscreen] = useState(false);
+  const isNativePlayerVisibleRef = useRef(false);
+  const nativePlayerEmbedInfoRef = useRef<VdoEmbedInfo | null>(null);
+  const vdoPlayerRef = useRef<VdoPlayerEmbeddedRef>(null);
+
+  const handleCloseNativePlayer = useCallback(() => {
+    isNativePlayerVisibleRef.current = false;
+    nativePlayerEmbedInfoRef.current = null;
+    setIsNativePlayerVisible(false);
+    setNativePlayerEmbedInfo(null);
+    setNativePlayerLayout(null);
+    setIsNativePlayerFullscreen(false);
+    webViewRef.current?.injectJavaScript(`
+      if (typeof window.__onNativeVdoPlayerClosed === 'function') {
+        window.__onNativeVdoPlayerClosed();
+      }
+      true;
+    `);
+  }, []);
+
+  const handleNativePlayerProgress = useCallback(
+    (progress: {
+      currentTimeMs: number;
+      currentTimeSeconds: number;
+      durationMs?: number;
+      durationSeconds?: number;
+    }) => {
+      const currentTimeMs =
+        typeof progress?.currentTimeMs === 'number'
+          ? progress.currentTimeMs
+          : 0;
+      const currentTimeSeconds =
+        typeof progress?.currentTimeSeconds === 'number'
+          ? progress.currentTimeSeconds
+          : Math.round((currentTimeMs / 1000) * 100) / 100;
+      const durationSeconds =
+        typeof progress?.durationSeconds === 'number'
+          ? progress.durationSeconds
+          : typeof progress?.durationMs === 'number' && progress.durationMs > 0
+          ? Math.round((progress.durationMs / 1000) * 100) / 100
+          : undefined;
+      const classId = nativePlayerEmbedInfoRef.current?.classId;
+
+      webViewRef.current?.injectJavaScript(`
+        if (typeof window.__onNativeVdoProgress === 'function') {
+          window.__onNativeVdoProgress({
+            currentTimeMs: ${currentTimeMs},
+            currentTimeSeconds: ${currentTimeSeconds},
+            ${typeof durationSeconds === 'number' ? `durationSeconds: ${durationSeconds},` : ''}
+            ${classId ? `classId: ${JSON.stringify(classId)},` : ''}
+            completed: false
+          });
+        }
+        true;
+      `);
+    },
+    []
+  );
+
+  const handleNativePlayerEnded = useCallback(() => {
+    const classId = nativePlayerEmbedInfoRef.current?.classId;
+    webViewRef.current?.injectJavaScript(`
+      if (typeof window.__onNativeVdoProgress === 'function') {
+        window.__onNativeVdoProgress({
+          completed: true,
+          ${classId ? `classId: ${JSON.stringify(classId)}` : ''}
+        });
+      }
+      true;
+    `);
+  }, []);
+
+  const handleNativePlayerError = useCallback((errorMessage: string) => {
+    webViewRef.current?.injectJavaScript(`
+      if (typeof window.__onNativeVdoError === 'function') {
+        window.__onNativeVdoError(${JSON.stringify(errorMessage)});
+      }
+      true;
+    `);
+  }, []);
+
   // Auto-retry when connection restores after a connection failure
   const prevOfflineRef = useRef(isOffline);
   useEffect(() => {
@@ -177,6 +270,18 @@ export default function HomeScreen() {
     if (Platform.OS !== 'android') return;
 
     const handleBackPress = () => {
+      // If native video player is in fullscreen, exit fullscreen first
+      if (isNativePlayerVisible && isNativePlayerFullscreen) {
+        const handled = vdoPlayerRef.current?.handleBackButtonClick();
+        if (handled) return true;
+      }
+
+      // If native video player is active (and not fullscreen), close it
+      if (isNativePlayerVisible) {
+        handleCloseNativePlayer();
+        return true;
+      }
+
       // If error overlay is active and user can go back, navigate back and clear error
       if (hasError && canGoBackRef.current && webViewRef.current) {
         setHasError(false);
@@ -199,7 +304,7 @@ export default function HomeScreen() {
       handleBackPress
     );
     return () => subscription.remove();
-  }, [hasError]);
+  }, [hasError, isNativePlayerVisible, isNativePlayerFullscreen, handleCloseNativePlayer]);
 
   const handleNavigationStateChange = useCallback((navState: WebViewNavigation) => {
     canGoBackRef.current = navState.canGoBack;
@@ -207,7 +312,16 @@ export default function HomeScreen() {
       setIsReady(true);
       setHasError((prev) => (prev ? false : prev));
     }
-  }, []);
+
+    // Automatically close native player if the user navigates away from class/lesson page
+    if (navState.url) {
+      const url = navState.url.toLowerCase();
+      const isClassroomUrl = url.includes('/courses/class/');
+      if (!isClassroomUrl && isNativePlayerVisibleRef.current) {
+        handleCloseNativePlayer();
+      }
+    }
+  }, [handleCloseNativePlayer]);
 
   const handleRetry = useCallback(() => {
     setHasError(false);
@@ -287,26 +401,154 @@ export default function HomeScreen() {
 
   const handleMessage = useCallback((event: WebViewMessageEvent) => {
     try {
-      const data = JSON.parse(event.nativeEvent.data);
-      if (data?.type === 'OPEN_IN_SAFARI' && typeof data.url === 'string') {
-        let targetUrl = data.url;
-        try {
-          const parsed = new URL(targetUrl);
-          parsed.searchParams.delete('open_external');
-          parsed.searchParams.delete('target');
-          parsed.searchParams.delete('fallback');
-          targetUrl = parsed.toString();
-        } catch {
-          // Keep original string if not a full parseable URL
-        }
-        Linking.openURL(targetUrl).catch((err) => {
-          console.warn('[ZeitnahMobile] Failed to open URL in Safari:', err);
-        });
+      if (!event?.nativeEvent?.data || typeof event.nativeEvent.data !== 'string') {
+        return;
       }
+
+      const data = JSON.parse(event.nativeEvent.data);
+
+      // 1. Handle native VdoCipher DRM playback request from web classroom
+      if (data?.type === 'PLAY_VDOCIPHER_NATIVE' && data?.payload) {
+        const payload = data.payload;
+        if (
+          typeof payload.otp === 'string' &&
+          typeof payload.playbackInfo === 'string' &&
+          payload.otp.length > 0 &&
+          payload.playbackInfo.length > 0
+        ) {
+          // If embedded layout coordinates are provided, validate and store them
+          if (
+            payload.layout &&
+            typeof payload.layout.width === 'number' &&
+            typeof payload.layout.height === 'number' &&
+            typeof payload.layout.x === 'number' &&
+            typeof payload.layout.y === 'number'
+          ) {
+            setNativePlayerLayout({
+              x: Math.round(payload.layout.x),
+              y: Math.round(payload.layout.y),
+              width: Math.max(0, Math.round(payload.layout.width)),
+              height: Math.max(0, Math.round(payload.layout.height)),
+              visible: payload.layout.visible !== false,
+            });
+          }
+
+          // Prevent duplicate launches if already active with exact same credentials
+          if (
+            isNativePlayerVisibleRef.current &&
+            nativePlayerEmbedInfoRef.current?.otp === payload.otp &&
+            nativePlayerEmbedInfoRef.current?.playbackInfo === payload.playbackInfo
+          ) {
+            return;
+          }
+          const embedInfo: VdoEmbedInfo = {
+            otp: payload.otp,
+            playbackInfo: payload.playbackInfo,
+            classId: typeof payload.classId === 'string' ? payload.classId : undefined,
+            title: typeof payload.title === 'string' ? payload.title : undefined,
+            resumeTimeMs:
+              typeof payload.resumeTimeMs === 'number' && payload.resumeTimeMs > 0
+                ? Math.round(payload.resumeTimeMs)
+                : undefined,
+          };
+          nativePlayerEmbedInfoRef.current = embedInfo;
+          isNativePlayerVisibleRef.current = true;
+          setNativePlayerEmbedInfo(embedInfo);
+          setIsNativePlayerVisible(true);
+          return;
+        }
+      }
+
+      // Handle layout geometry updates from web classroom scroll / resize / drawer open
+      if (data?.type === 'UPDATE_VDOCIPHER_LAYOUT' && data?.payload?.layout) {
+        const layout = data.payload.layout;
+        if (
+          typeof layout.width === 'number' &&
+          typeof layout.height === 'number' &&
+          typeof layout.x === 'number' &&
+          typeof layout.y === 'number'
+        ) {
+          setNativePlayerLayout({
+            x: Math.round(layout.x),
+            y: Math.round(layout.y),
+            width: Math.max(0, Math.round(layout.width)),
+            height: Math.max(0, Math.round(layout.height)),
+            visible: layout.visible !== false,
+          });
+        }
+        return;
+      }
+
+      // 2. Handle native player close request from web classroom
+      if (data?.type === 'CLOSE_VDOCIPHER_NATIVE') {
+        handleCloseNativePlayer();
+        return;
+      }
+
+      // 3. Handle seek request from web classroom (chapters, bookmarks, notes)
+      if (data?.type === 'SEEK_VDOCIPHER_NATIVE' && data?.payload) {
+        const payload = data.payload;
+        const targetMs =
+          typeof payload.timeMs === 'number' && !isNaN(payload.timeMs)
+            ? Math.max(0, Math.round(payload.timeMs))
+            : typeof payload.timeSeconds === 'number' && !isNaN(payload.timeSeconds)
+            ? Math.max(0, Math.round(payload.timeSeconds * 1000))
+            : null;
+        if (targetMs !== null) {
+          vdoPlayerRef.current?.seek(targetMs);
+        }
+        return;
+      }
+
+      // 3. Handle fallback OPEN_IN_SAFARI request
+      if (data?.type !== 'OPEN_IN_SAFARI' || typeof data.url !== 'string') {
+        return;
+      }
+
+      let parsed: URL;
+      try {
+        parsed = new URL(data.url);
+      } catch {
+        // Reject malformed or non-parseable URLs safely
+        return;
+      }
+
+      // Enforce strict HTTPS scheme (reject javascript:, data:, file:, intent:, etc.)
+      if (parsed.protocol !== 'https:') {
+        return;
+      }
+
+      // Enforce exact trusted hostnames (reject lookalikes and unauthorized subdomains)
+      const host = parsed.hostname.toLowerCase();
+      const isAllowedHost =
+        host === 'zeitnahacademy.com' || host === 'www.zeitnahacademy.com';
+      if (!isAllowedHost) {
+        return;
+      }
+
+      // Enforce allowed paths for course/classroom video playback handoff
+      const normalizedPath = parsed.pathname.replace(/\/+$/, '') || '/';
+      const isAllowedPath =
+        normalizedPath === '/courses' ||
+        normalizedPath.startsWith('/courses/') ||
+        normalizedPath.startsWith('/course/');
+      if (!isAllowedPath) {
+        return;
+      }
+
+      // Strip query parameters used for internal routing/fallback flags
+      parsed.searchParams.delete('open_external');
+      parsed.searchParams.delete('target');
+      parsed.searchParams.delete('fallback');
+
+      const targetUrl = parsed.toString();
+      Linking.openURL(targetUrl).catch((err) => {
+        console.warn('[ZeitnahMobile] Failed to open URL in Safari:', err);
+      });
     } catch {
-      // Ignore non-JSON messages
+      // Ignore non-JSON or unexpected messages without crashing
     }
-  }, []);
+  }, [handleCloseNativePlayer]);
 
   const handleShouldStartLoadWithRequest = useCallback(
     (request: ShouldStartLoadRequest): boolean => {
@@ -408,53 +650,71 @@ export default function HomeScreen() {
       {/* Non-intrusive compact offline notification banner when website is already loaded */}
       <OfflineBanner visible={isOffline && isReady && !hasError} />
 
-      {/* Main WebView (Kept permanently mounted to preserve Chromium process, cache, and warm state) */}
-      <WebView
-        ref={webViewRef}
-        source={WEBVIEW_SOURCE}
-        style={styles.webView}
-        // Scripting & Storage for full authentication support
-        javaScriptEnabled={true}
-        domStorageEnabled={true}
-        sharedCookiesEnabled={true}
-        thirdPartyCookiesEnabled={true}
-        // Media & DRM Video Playback
-        allowsProtectedMedia={true}
-        allowsInlineMediaPlayback={true}
-        mediaPlaybackRequiresUserAction={false}
-        allowsFullscreenVideo={true}
-        allowsAirPlayForMediaPlayback={true}
-        allowsPictureInPictureMediaPlayback={true}
-        androidLayerType="hardware"
-        // Caching & Performance
-        cacheEnabled={true}
-        cacheMode="LOAD_DEFAULT"
-        // Navigation & Security
-        originWhitelist={['*']}
-        mixedContentMode="compatibility"
-        onNavigationStateChange={handleNavigationStateChange}
-        onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
-        // Lifecycle, Progress & Recovery
-        onLoadStart={handleLoadStart}
-        onLoadProgress={handleLoadProgress}
-        onLoadEnd={handleLoadEnd}
-        onError={handleError}
-        onHttpError={handleHttpError}
-        onRenderProcessGone={handleRenderProcessGone}
-        // File downloads support
-        onFileDownload={handleFileDownload}
-        // Native Bridge Messaging (opens clean URL in Mobile Safari without query flags)
-        onMessage={handleMessage}
-        // Layout & Behavior
-        scalesPageToFit={false}
-        textZoom={100}
-        pullToRefreshEnabled={true}
-        contentInsetAdjustmentBehavior="never"
-        applicationNameForUserAgent="ZeitnahMobile/1.0.3"
-        userAgent={
-          Platform.OS === 'android' ? ANDROID_CHROME_USER_AGENT : undefined
-        }
-      />
+      {/* Main Content Wrapper (WebView + Embedded Native VdoCipher Player) */}
+      <View style={styles.contentWrapper}>
+        <WebView
+          ref={webViewRef}
+          source={WEBVIEW_SOURCE}
+          style={styles.webView}
+          // Scripting & Storage for full authentication support
+          javaScriptEnabled={true}
+          domStorageEnabled={true}
+          sharedCookiesEnabled={true}
+          thirdPartyCookiesEnabled={true}
+          // Media & DRM Video Playback
+          allowsProtectedMedia={true}
+          allowsInlineMediaPlayback={true}
+          mediaPlaybackRequiresUserAction={false}
+          allowsFullscreenVideo={true}
+          allowsAirPlayForMediaPlayback={true}
+          allowsPictureInPictureMediaPlayback={true}
+          androidLayerType="hardware"
+          // Caching & Performance
+          cacheEnabled={true}
+          cacheMode="LOAD_DEFAULT"
+          // Navigation & Security
+          originWhitelist={['*']}
+          mixedContentMode="compatibility"
+          onNavigationStateChange={handleNavigationStateChange}
+          onShouldStartLoadWithRequest={handleShouldStartLoadWithRequest}
+          // Lifecycle, Progress & Recovery
+          onLoadStart={handleLoadStart}
+          onLoadProgress={handleLoadProgress}
+          onLoadEnd={handleLoadEnd}
+          onError={handleError}
+          onHttpError={handleHttpError}
+          onRenderProcessGone={handleRenderProcessGone}
+          // File downloads support
+          onFileDownload={handleFileDownload}
+          // Native Bridge Messaging (opens clean URL in Mobile Safari without query flags)
+          onMessage={handleMessage}
+          // Layout & Behavior
+          scalesPageToFit={false}
+          textZoom={100}
+          pullToRefreshEnabled={true}
+          contentInsetAdjustmentBehavior="never"
+          applicationNameForUserAgent="ZeitnahMobile/1.0.3"
+          userAgent={
+            Platform.OS === 'android' ? ANDROID_CHROME_USER_AGENT : undefined
+          }
+        />
+
+        {/* Embedded Native VdoCipher Player (Hardware Playback rendered inside the existing course screen) */}
+        {isNativePlayerVisible && (
+          <VdoPlayerEmbedded
+            ref={vdoPlayerRef}
+            visible={isNativePlayerVisible}
+            embedInfo={nativePlayerEmbedInfo}
+            layout={nativePlayerLayout}
+            title={nativePlayerEmbedInfo?.title}
+            onProgress={handleNativePlayerProgress}
+            onEnded={handleNativePlayerEnded}
+            onError={handleNativePlayerError}
+            onEnterFullscreen={() => setIsNativePlayerFullscreen(true)}
+            onExitFullscreen={() => setIsNativePlayerFullscreen(false)}
+          />
+        )}
+      </View>
 
       {/* Cinematic Dark Loading Screen (smooth logo reveal, ambient glow, seamless exit fade) */}
       <CinematicLoader isReady={isReady} hasError={hasError} />
@@ -475,6 +735,11 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: ZeitnahColors.background,
+  },
+  contentWrapper: {
+    flex: 1,
+    position: 'relative',
+    overflow: 'hidden',
   },
   webView: {
     flex: 1,
